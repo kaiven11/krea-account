@@ -1,0 +1,15 @@
+# secrets & runtime data
+.env
+accounts.txt
+checkout_links.txt
+session_*.json
+krea_session.json
+krea_probe_session.json
+
+# screenshots / probe artifacts
+*.png
+probe_*.py
+
+# python
+__pycache__/
+*.pyc
