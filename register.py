@@ -4,6 +4,7 @@ import sys
 import time
 import random
 import string
+from urllib.parse import quote
 
 from oututil import setup_utf8_stdout
 
@@ -28,6 +29,10 @@ PROXY_MODE = os.getenv("PROXY_MODE", "clash")
 HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
 BASE = "https://www.krea.ai"
 TURNSTILE_SITEKEY = "0x4AAAAAAARCAQia-P1X7s4C"
+# KIMHub 商品配额控制
+KIMHUB_URL = os.getenv("KIMHUB_URL", "http://127.0.0.1:4000")
+KREA_PRODUCT = os.getenv("KREA_PRODUCT", "Krea Basic")
+QUOTA_ENABLED = os.getenv("QUOTA_ENABLED", "true").lower() == "true"
 
 SIGNUP_URLS = [f"{BASE}/login"]
 
@@ -42,6 +47,23 @@ def log(msg):
 def gen_email():
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     return f"{EMAIL_PREFIX}{suffix}@{EMAIL_DOMAIN}"
+
+
+def check_quota():
+    """向 KIMHub 查询当前商品的注册配额。
+    返回 (allowed, quota, info)。quota: -1=不限, 0=不可注册, >0=还能注册几个。
+    KIMHub 离线时返回 (True, -1, {...}) 以便独立运行。"""
+    if not QUOTA_ENABLED:
+        return True, -1, {"quota": -1, "reason": "quota_disabled"}
+    import requests as _rq
+    url = f"{KIMHUB_URL}/api/products/{quote(KREA_PRODUCT)}/acquire-quota"
+    try:
+        r = _rq.get(url, timeout=8)
+        d = r.json()
+        return bool(d.get("allowed")), d.get("quota", -1), d
+    except Exception as e:
+        log(f"⚠️ KIMHub 配额查询失败（将独立运行，不受控制）: {e}")
+        return True, -1, {"quota": -1, "reason": "kimhub_offline"}
 
 
 DETECT_JS = """
@@ -773,11 +795,31 @@ def main():
         except Exception as e:
             log(f"Clash 轮换器初始化失败（将以直连运行）: {e}")
 
+    # ★ 启动前查 KIMHub 配额: 商品禁用 / 池满 → 直接不启动
+    allowed, quota, qinfo = check_quota()
+    log(f"KIMHub 配额 [{KREA_PRODUCT}]: allowed={allowed} quota={quota} "
+        f"inPool={qinfo.get('inPool')} maxLinks={qinfo.get('maxLinks')} reason={qinfo.get('reason')}")
+    if not allowed:
+        log(f"❌ 商品不可注册（{qinfo.get('reason')}），退出。如需强制运行，设 QUOTA_ENABLED=false")
+        return
+
+    target = ACCOUNT_COUNT if quota < 0 else min(ACCOUNT_COUNT, quota)
+    if target < ACCOUNT_COUNT:
+        log(f"配额限制: 本次最多注册 {target} 个（ACCOUNT_COUNT={ACCOUNT_COUNT}, 剩余配额={quota}）")
+    if target <= 0:
+        log("❌ 无可用配额，退出")
+        return
+
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
     results = []
     with sync_playwright() as p:
-        for i in range(ACCOUNT_COUNT):
-            log(f"===== 账号 {i + 1}/{ACCOUNT_COUNT} =====")
+        for i in range(target):
+            # ★ 每轮注册前回查配额
+            allowed, quota, qinfo = check_quota()
+            if not allowed:
+                log(f"⛔ 配额已耗尽（{qinfo.get('reason')}），提前停止（已成功 {len(results)} 个）")
+                break
+            log(f"===== 账号 {i + 1}/{target} =====")
             info = None
             for attempt in range(1, max_retries + 1):
                 email = gen_email()
@@ -804,7 +846,7 @@ def main():
             else:
                 log(f"❌ 账号 {i + 1} 重试 {max_retries} 次仍失败")
 
-    log(f"===== 批量完成: 成功 {len(results)}/{ACCOUNT_COUNT} =====")
+    log(f"===== 批量完成: 成功 {len(results)}/{target} =====")
     for r in results:
         log(f"  {r['email']}")
 
