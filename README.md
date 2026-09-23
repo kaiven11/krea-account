@@ -268,12 +268,37 @@ krea-account/
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `ACCOUNT_COUNT` | 1 | 批量注册数 |
+| `ACCOUNT_COUNT` | 1 | 批量注册数（**上限**，实际受 KIMHub 配额约束）|
 | `MAX_RETRIES` | 3 | 每账号最大重试 |
 | `CHECKOUT_PLAN` | Basic | 目标套餐，只认该档 |
 | `CHECKOUT_CYCLE` | monthly | 计费周期 |
 | `CHECKOUT_ENABLED` | true | 是否抓支付链接 |
 | `HEADLESS` | false | 显示浏览器窗口 |
+| `KIMHUB_URL` | http://127.0.0.1:4000 | KIMHub 地址 |
+| `KREA_PRODUCT` | Krea Basic | 对应 KIMHub 商品名（配额按此查）|
+| `QUOTA_ENABLED` | true | 是否受 KIMHub 配额控制（false=独立无限跑）|
+
+## 9.1 KIMHub 配额控制（防止无限注册）
+
+生产端启动前与每轮注册前都会向 KIMHub 查询配额，受商品规范约束：
+
+```
+GET /api/products/{KREA_PRODUCT}/acquire-quota
+→ { allowed, quota, inPool, maxLinks, enabled, reason }
+```
+
+| KIMHub 配置 | 生产端行为 |
+|-------------|-----------|
+| 商品 `enabled: false` | **启动即退出**（reason: product_disabled）|
+| `maxLinks` 已达上限（池满）| **启动即退出 / 中途刹车**（reason: pool_full）|
+| `maxLinks = N`（还有余额）| 本次最多注册 `min(ACCOUNT_COUNT, N - inPool)` 个 |
+| `maxLinks = 0`（不限）| 按 `ACCOUNT_COUNT` 注册 |
+
+**中途刹车**：每注册成功一个账号后回查配额，池满立即停止（可与其他生产端/消费端共享配额）。
+
+**KIMHub 离线时**：默认独立运行不受控（会打警告）。要严格受控请确保 KIMHub 在线。
+
+> 例：KIMHub 设 Krea Basic `maxLinks=10`，当前池内 8 条 → 配额 2 → 即使 `ACCOUNT_COUNT=5` 也只注册 2 个就停。
 
 ## 10. 输出
 
